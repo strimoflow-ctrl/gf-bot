@@ -4,3 +4,6 @@ pymongo
 apscheduler
 python-dotenv
 nest_asyncio
+certifi
+flask
+gunicorn
