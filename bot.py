@@ -56,28 +56,26 @@ except Exception as e:
     sys.exit(1)
 
 # ==============================================================================
-# 🧠 DATABASE CONNECTION (Updated Fix)
+# 🧠 DATABASE CONNECTION (FORCE CONNECT MODE)
 # ==============================================================================
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 try:
-    # --- FIX IS HERE ---
-    # Humne 'tlsAllowInvalidCertificates=True' add kiya hai.
-    # Ye Render aur MongoDB ke beech ki ladai khatam kar dega.
-    mongo_client = pymongo.MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
+    # ssl=False aur tlsAllowInvalidCertificates=True ka matlab:
+    # "Security certificate check mat karo, bas connect ho jao"
+    mongo_client = pymongo.MongoClient(
+        MONGO_URI, 
+        tls=True, 
+        tlsAllowInvalidCertificates=True
+    )
     
     db = mongo_client["RiyaBot_Final"]
     users_col = db["users"]
     
-    # Connection test
+    # Test
     mongo_client.admin.command('ping')
-    logger.info("✅ Connected to MongoDB Successfully (SSL Bypass)!")
+    logger.info("✅ Connected to MongoDB (Force Mode)!")
 
 except Exception as e:
-    logger.error(f"❌ MongoDB Connection Failed: {e}")
-    # Ab hum exit nahi karenge, balki retry karenge ya bina DB ke chalne denge (Temporary)
-    # sys.exit(1) # Ise hata diya taaki bot crash na ho
+    logger.error(f"❌ DB Error: {e}")
 # ==============================================================================
 # 🤖 API LOAD BALANCER
 # ==============================================================================
