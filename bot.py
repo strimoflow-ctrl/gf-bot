@@ -15,11 +15,17 @@ import certifi
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
-# Local testing ke liye .env load karega
+# Local testing ke liye
 load_dotenv()
 
 # ==============================================================================
-# 🛠️ SYSTEM KEEP-ALIVE SERVER (Render Requirement)
+# 1. LOGGING SETUP (Sabse Pehle - Taaki Error na aaye)
+# ==============================================================================
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# 2. DUMMY SERVER (Render Port Error Fix)
 # ==============================================================================
 app = Flask(__name__)
 
@@ -28,68 +34,69 @@ def health_check():
     return "Riya Bot is Active & Running! 🟢", 200
 
 def run_web_server():
-    # Render dynamic port deta hai, hum wahi use karenge
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 def start_background_server():
     t = threading.Thread(target=run_web_server)
-    t.daemon = True # Main program band hote hi ye bhi band ho jayega
+    t.daemon = True
     t.start()
 
 # ==============================================================================
-# ⚙️ CONFIGURATION & KEYS
+# 3. CONFIGURATION & KEYS
 # ==============================================================================
 try:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     CHANNEL_ID = os.getenv("CHANNEL_ID") 
     CHANNEL_URL = os.getenv("CHANNEL_URL")
     MONGO_URI = os.getenv("MONGO_URI")
-    # Keys ko safely list me convert karna
     keys_str = os.getenv("GROQ_KEYS", "")
     GROQ_KEYS = [k.strip() for k in keys_str.split(",") if k.strip()]
     
     if not TELEGRAM_TOKEN or not MONGO_URI or not GROQ_KEYS:
-        raise ValueError("Environment Variables Missing! Check Render Settings.")
+        logger.error("❌ Environment Variables Missing! Check Render Settings.")
 except Exception as e:
-    print(f"❌ CONFIG ERROR: {e}")
-    sys.exit(1)
+    logger.error(f"❌ CONFIG ERROR: {e}")
 
 # ==============================================================================
-# 🧠 DATABASE CONNECTION (FORCE CONNECT MODE)
+# 4. DATABASE CONNECTION (Force Connect Mode)
 # ==============================================================================
 try:
-    # ssl=False aur tlsAllowInvalidCertificates=True ka matlab:
-    # "Security certificate check mat karo, bas connect ho jao"
+    # Force Connect: Security Bypass karke connect karega
     mongo_client = pymongo.MongoClient(
         MONGO_URI, 
         tls=True, 
         tlsAllowInvalidCertificates=True
     )
-    
     db = mongo_client["RiyaBot_Final"]
     users_col = db["users"]
     
-    # Test
+    # Test Connection
     mongo_client.admin.command('ping')
-    logger.info("✅ Connected to MongoDB (Force Mode)!")
+    logger.info("✅ Connected to MongoDB Successfully (Force Mode)!")
 
 except Exception as e:
-    logger.error(f"❌ DB Error: {e}")
+    logger.error(f"❌ MongoDB Connection Failed: {e}")
+    # Connection fail hone par bhi bot crash nahi hone denge
+    # Taaki kam se kam 'Start' command chale
+
 # ==============================================================================
-# 🤖 API LOAD BALANCER
+# 5. API LOAD BALANCER
 # ==============================================================================
 current_key_index = 0
 
 def get_groq_client():
     global current_key_index
+    if not GROQ_KEYS:
+        return None
     key = GROQ_KEYS[current_key_index]
     return Groq(api_key=key)
 
 def switch_key():
     global current_key_index
-    current_key_index = (current_key_index + 1) % len(GROQ_KEYS)
-    logger.warning(f"⚠️ Switching API Key to Index: {current_key_index}")
+    if GROQ_KEYS:
+        current_key_index = (current_key_index + 1) % len(GROQ_KEYS)
+        logger.warning(f"⚠️ Switching API Key to Index: {current_key_index}")
 
 # ==============================================================================
 # 🎭 INTELLIGENCE & PERSONALITY (The Brain)
@@ -135,7 +142,7 @@ def intercept_safety_filter(reply_text):
     return reply_text
 
 # ==============================================================================
-# 🛡️ GATEKEEPER (Force Join)
+# 7. GATEKEEPER (Force Join)
 # ==============================================================================
 async def check_membership(user_id, bot):
     try:
@@ -144,28 +151,28 @@ async def check_membership(user_id, bot):
             return True
     except Exception as e:
         logger.error(f"Join Check Error: {e}")
-        # Agar bot admin nahi hai, tab bhi false return karo (Strict Mode)
         return False
     return False
 
 # ==============================================================================
-# 🎮 EVENT HANDLERS
+# 8. HANDLERS
 # ==============================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # Database Initialization for new user
-    if not users_col.find_one({"user_id": user.id}):
-        users_col.insert_one({
-            "user_id": user.id,
-            "first_name": user.first_name,
-            "love_level": 10,
-            "mood": "happy",
-            "last_active": datetime.datetime.now(),
-            "history": []
-        })
+    try:
+        if not users_col.find_one({"user_id": user.id}):
+            users_col.insert_one({
+                "user_id": user.id,
+                "first_name": user.first_name,
+                "love_level": 10,
+                "mood": "happy",
+                "last_active": datetime.datetime.now(),
+                "history": []
+            })
+    except Exception:
+        pass # DB Error ignore for start
 
-    # Join Verification
     if not await check_membership(user.id, context.bot):
         keyboard = [
             [InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)],
@@ -193,16 +200,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
     
-    # DB Load
-    user_data = users_col.find_one({"user_id": user.id})
-    if not user_data:
-        await start(update, context)
-        return
+    # DB Fail Safe
+    try:
+        user_data = users_col.find_one({"user_id": user.id})
+        if not user_data:
+            await start(update, context)
+            return
+        # Update Activity
+        users_col.update_one({"user_id": user.id}, {"$set": {"last_active": datetime.datetime.now()}})
+    except Exception:
+        # Agar DB connect nahi hai, to Default values use karo
+        user_data = {"love_level": 10, "mood": "happy", "history": []}
 
-    # Update Activity
-    users_col.update_one({"user_id": user.id}, {"$set": {"last_active": datetime.datetime.now()}})
-
-    # Smart Night Logic
     night_keywords = ["nind", "sona", "sleep", "gn", "good night", "thak gaya", "bye"]
     if any(word in text.lower() for word in night_keywords):
         await update.message.reply_text("Theek hai baby, so jao. Good night! Sapno mein milte hain. 🌙😘")
@@ -210,13 +219,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
-    # Prepare Context
     history = user_data.get("history", [])[-8:]
     prompt = get_system_prompt(user.first_name, user_data.get("love_level", 10), user_data.get("mood", "happy"))
     messages = [{"role": "system", "content": prompt}] + history + [{"role": "user", "content": text}]
 
     try:
         client = get_groq_client()
+        if not client:
+            await update.message.reply_text("Server Error: No API Keys found.")
+            return
+
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
@@ -229,11 +241,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(final_reply)
 
         # Save History
-        new_entry = [{"role": "user", "content": text}, {"role": "assistant", "content": final_reply}]
-        users_col.update_one({"user_id": user.id}, {
-            "$push": {"history": {"$each": new_entry}},
-            "$inc": {"love_level": 1}
-        })
+        try:
+            new_entry = [{"role": "user", "content": text}, {"role": "assistant", "content": final_reply}]
+            users_col.update_one({"user_id": user.id}, {
+                "$push": {"history": {"$each": new_entry}},
+                "$inc": {"love_level": 1}
+            })
+        except:
+            pass
 
     except Exception as e:
         logger.error(f"Generate Error: {e}")
@@ -241,42 +256,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Baby network issue hai... ek baar phir bolo? 🥺")
 
 # ==============================================================================
-# ⏰ SMART SCHEDULER
+# 9. SCHEDULER
 # ==============================================================================
 async def smart_morning_routine(context: ContextTypes.DEFAULT_TYPE):
-    """6AM-8AM: Wake up active users"""
-    now = datetime.datetime.now()
-    if 6 <= now.hour < 8:
-        # Get users active in last 2 days but not since 5AM today
-        cutoff_active = now - datetime.timedelta(days=2)
-        today_5am = now.replace(hour=5, minute=0)
-        
-        target_users = list(users_col.find({
-            "last_active": {"$gte": cutoff_active, "$lt": today_5am}
-        }).limit(10)) # Limit to 10 per batch to avoid spam bans
+    try:
+        now = datetime.datetime.now()
+        if 6 <= now.hour < 8:
+            cutoff_active = now - datetime.timedelta(days=2)
+            today_5am = now.replace(hour=5, minute=0)
+            target_users = list(users_col.find({
+                "last_active": {"$gte": cutoff_active, "$lt": today_5am}
+            }).limit(10))
 
-        msgs = ["Good morning baby! Uth gaye? ☀️", "Subah ho gayi! Missed you. 😘", "Uth jao!"]
-        
-        for u in target_users:
-            try:
-                await context.bot.send_message(u["user_id"], random.choice(msgs))
-                # Fake update last active so we don't msg again today
-                users_col.update_one({"_id": u["_id"]}, {"$set": {"last_active": now}})
-            except:
-                pass
+            msgs = ["Good morning baby! Uth gaye? ☀️", "Subah ho gayi! Missed you. 😘", "Uth jao!"]
+            for u in target_users:
+                try:
+                    await context.bot.send_message(u["user_id"], random.choice(msgs))
+                    users_col.update_one({"_id": u["_id"]}, {"$set": {"last_active": now}})
+                except:
+                    pass
+    except Exception as e:
+        logger.error(f"Scheduler Error: {e}")
 
 async def smart_night_check(context: ContextTypes.DEFAULT_TYPE):
-    """11PM: Check on inactive users"""
-    now = datetime.datetime.now()
-    if now.hour == 23:
-        cutoff = now - datetime.timedelta(hours=6)
-        inactive_users = users_col.find({"last_active": {"$lt": cutoff}}).limit(10)
-        
-        for u in inactive_users:
-            try:
-                await context.bot.send_message(u["user_id"], "Bina Good Night bole so gaye? 🥺🌙")
-            except:
-                pass
+    try:
+        now = datetime.datetime.now()
+        if now.hour == 23:
+            cutoff = now - datetime.timedelta(hours=6)
+            inactive_users = users_col.find({"last_active": {"$lt": cutoff}}).limit(10)
+            for u in inactive_users:
+                try:
+                    await context.bot.send_message(u["user_id"], "Bina Good Night bole so gaye? 🥺🌙")
+                except:
+                    pass
+    except:
+        pass
 
 async def post_init(application):
     scheduler = AsyncIOScheduler()
@@ -286,17 +300,14 @@ async def post_init(application):
     logger.info("✅ Scheduler Started Successfully!")
 
 # ==============================================================================
-# 🔥 LAUNCHER
+# 10. LAUNCH
 # ==============================================================================
 if __name__ == '__main__':
     print("🚀 Starting Riya Bot System...")
     
-    # 1. Start Dummy Web Server (Fix for Render Port Error)
     start_background_server()
 
-    # 2. Start Telegram Bot
     t_req = HTTPXRequest(connection_pool_size=8, read_timeout=60, write_timeout=60, connect_timeout=60)
-    
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_req).post_init(post_init).build()
 
     application.add_handler(CommandHandler('start', start))
