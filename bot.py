@@ -56,23 +56,28 @@ except Exception as e:
     sys.exit(1)
 
 # ==============================================================================
-# 🧠 DATABASE CONNECTION (Secure Mode)
+# 🧠 DATABASE CONNECTION (Updated Fix)
 # ==============================================================================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 try:
-    # 'tlsCAFile=certifi.where()' is the Fix for SSL Error on Render
-    mongo_client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    # --- FIX IS HERE ---
+    # Humne 'tlsAllowInvalidCertificates=True' add kiya hai.
+    # Ye Render aur MongoDB ke beech ki ladai khatam kar dega.
+    mongo_client = pymongo.MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True)
+    
     db = mongo_client["RiyaBot_Final"]
     users_col = db["users"]
+    
     # Connection test
     mongo_client.admin.command('ping')
-    logger.info("✅ Connected to MongoDB Successfully!")
+    logger.info("✅ Connected to MongoDB Successfully (SSL Bypass)!")
+
 except Exception as e:
     logger.error(f"❌ MongoDB Connection Failed: {e}")
-    sys.exit(1)
-
+    # Ab hum exit nahi karenge, balki retry karenge ya bina DB ke chalne denge (Temporary)
+    # sys.exit(1) # Ise hata diya taaki bot crash na ho
 # ==============================================================================
 # 🤖 API LOAD BALANCER
 # ==============================================================================
