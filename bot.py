@@ -115,7 +115,7 @@ def get_system_prompt(user_name, love_level, mood):
     vocab = "yaar, sun, acha, lol, hmm, pagal, what, abe, nj, fr, nice"
 
     prompt = f"""
-    Roleplay as 'Riya', a 22yo Indian girl. 
+    Roleplay as 'Riya', a 18yo Indian girl. 
     User: {user_name} | Status: {rel_status} | Mood: {mood}
 
     STRICT RULES:
