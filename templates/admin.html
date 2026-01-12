@@ -3,61 +3,154 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Riya Bot Admin</title>
+    <title>Cryvex AI - Master Control</title>
     <style>
-        body { background-color: #0a0a0a; color: #00ff9d; font-family: monospace; padding: 20px; }
-        h1 { border-bottom: 2px solid #00ff9d; padding-bottom: 10px; }
-        .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .card { background: #111; padding: 20px; border: 1px solid #333; border-radius: 8px; }
-        .number { font-size: 40px; font-weight: bold; color: white; }
-        table { width: 100%; border-collapse: collapse; background: #111; }
-        th { text-align: left; padding: 10px; border-bottom: 1px solid #333; color: white; }
-        td { padding: 10px; border-bottom: 1px solid #222; color: #aaa; font-size: 14px; }
-        .user { color: #fff; font-weight: bold; }
-        .msg { color: #00ff9d; }
+        :root { --neon: #00ff9d; --dark: #050505; --panel: #111; --user-msg: #222; --bot-msg: #003320; }
+        body { background-color: var(--dark); color: #fff; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+        
+        /* Stats Cards */
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .card { background: var(--panel); padding: 15px; border: 1px solid #333; border-radius: 8px; text-align: center; }
+        .card h3 { color: #888; margin: 0; font-size: 14px; text-transform: uppercase; }
+        .number { font-size: 32px; font-weight: bold; color: var(--neon); margin-top: 5px; }
+
+        /* User Table */
+        .table-container { background: var(--panel); border: 1px solid #333; border-radius: 8px; overflow: hidden; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #1a1a1a; color: var(--neon); padding: 12px; text-align: left; font-size: 14px; }
+        td { padding: 12px; border-bottom: 1px solid #222; font-size: 13px; cursor: pointer; transition: 0.2s; }
+        tr:hover { background: #1a1a1a; }
+        .mood-badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; background: #222; border: 1px solid #444; }
+
+        /* Modal (Chat Popup) */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; }
+        .modal-content { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 90%; max-width: 500px; height: 80vh; background: var(--dark);
+            border: 1px solid var(--neon); border-radius: 10px; display: flex; flex-direction: column;
+        }
+        .modal-header { padding: 15px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #111; }
+        .close { cursor: pointer; font-size: 24px; color: #ff4444; }
+        
+        .chat-box { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
+        .bubble { max-width: 80%; padding: 8px 12px; border-radius: 8px; font-size: 13px; line-height: 1.4; }
+        .u-bubble { align-self: flex-start; background: var(--user-msg); border-top-left-radius: 0; color: #ddd; }
+        .b-bubble { align-self: flex-end; background: var(--bot-msg); border: 1px solid var(--neon); border-top-right-radius: 0; color: #fff; }
+        
+        .input-area { padding: 15px; border-top: 1px solid #333; display: flex; gap: 10px; background: #111; }
+        input { flex: 1; padding: 10px; background: #222; border: 1px solid #444; color: white; border-radius: 4px; outline: none; }
+        button { padding: 10px 20px; background: var(--neon); border: none; color: black; font-weight: bold; cursor: pointer; border-radius: 4px; }
     </style>
 </head>
 <body>
-    <h1>🚀 CRYVEX AI - DASHBOARD</h1>
-    
-    <div class="card-grid">
-        <div class="card"><h3>TOTAL USERS</h3><div class="number" id="total">Loading...</div></div>
-        <div class="card"><h3>ACTIVE (24H)</h3><div class="number" id="active">Loading...</div></div>
-        <div class="card"><h3>ANGRY GFs</h3><div class="number" id="angry">Loading...</div></div>
+
+    <h2 style="color:var(--neon)">🚀 CRYVEX ADMIN</h2>
+
+    <div class="stats">
+        <div class="card"><h3>Total Users</h3><div class="number" id="total">-</div></div>
+        <div class="card"><h3>Active (24h)</h3><div class="number" id="active">-</div></div>
+        <div class="card"><h3>Angry Users</h3><div class="number" id="angry">-</div></div>
     </div>
 
-    <h2>🕵️ RECENT CHATS</h2>
-    <table>
-        <thead><tr><th>User</th><th>Last Message</th><th>Bot Reply</th><th>Mood</th><th>Time</th></tr></thead>
-        <tbody id="chats"></tbody>
-    </table>
+    <div class="table-container">
+        <table>
+            <thead><tr><th>Name</th><th>Mood</th><th>Last Active</th><th>Action</th></tr></thead>
+            <tbody id="userTable"></tbody>
+        </table>
+    </div>
+
+    <!-- Chat Modal -->
+    <div id="chatModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="chatTitle" style="margin:0">User Chat</h3>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <div class="chat-box" id="chatHistory"></div>
+            <div class="input-area">
+                <input type="text" id="replyInput" placeholder="Type a reply as Riya...">
+                <button onclick="sendReply()">SEND</button>
+            </div>
+        </div>
+    </div>
 
     <script>
-        async function loadData() {
-            let pass = new URLSearchParams(window.location.search).get("pass");
-            let res = await fetch('/api/stats?pass=' + pass);
+        let currentUserId = null;
+        let pass = new URLSearchParams(window.location.search).get("pass");
+
+        async function loadStats() {
+            let res = await fetch(`/api/stats?pass=${pass}`);
             let data = await res.json();
-            
-            if(data.error) { alert("Wrong Password!"); return; }
+            if(data.error) return;
 
             document.getElementById('total').innerText = data.total;
             document.getElementById('active').innerText = data.active;
             document.getElementById('angry').innerText = data.angry;
 
-            let rows = "";
-            data.chats.forEach(c => {
-                rows += `<tr>
-                    <td class="user">${c.name}</td>
-                    <td class="msg">"${c.user_msg}"</td>
-                    <td>"${c.bot_msg}"</td>
-                    <td>${c.mood}</td>
-                    <td>${c.time}</td>
+            let html = "";
+            data.chats.forEach(u => {
+                html += `
+                <tr onclick="openChat('${u.id}', '${u.name}')">
+                    <td>${u.name}</td>
+                    <td><span class="mood-badge" style="color:${u.mood=='angry'?'red':'#00ff9d'}">${u.mood}</span></td>
+                    <td>${u.time}</td>
+                    <td style="color:var(--neon)">👉 Open Chat</td>
                 </tr>`;
             });
-            document.getElementById('chats').innerHTML = rows;
+            document.getElementById('userTable').innerHTML = html;
         }
-        loadData();
-        setInterval(loadData, 5000); // Auto refresh every 5s
+
+        async function openChat(userId, name) {
+            currentUserId = userId;
+            document.getElementById('chatTitle').innerText = "Chat with: " + name;
+            document.getElementById('chatModal').style.display = 'block';
+            
+            // Load History
+            let res = await fetch(`/api/history/${userId}?pass=${pass}`);
+            let data = await res.json();
+            renderChat(data.history);
+        }
+
+        function renderChat(history) {
+            let html = "";
+            history.forEach(msg => {
+                if(msg.role === 'user') {
+                    html += `<div class="bubble u-bubble"><b>User:</b> ${msg.content}</div>`;
+                } else {
+                    html += `<div class="bubble b-bubble"><b>Riya:</b> ${msg.content}</div>`;
+                }
+            });
+            let box = document.getElementById('chatHistory');
+            box.innerHTML = html;
+            box.scrollTop = box.scrollHeight;
+        }
+
+        async function sendReply() {
+            let text = document.getElementById('replyInput').value;
+            if(!text) return;
+
+            document.getElementById('replyInput').value = "";
+            // Optimistic update
+            let box = document.getElementById('chatHistory');
+            box.innerHTML += `<div class="bubble b-bubble" style="opacity:0.7"><b>Sending:</b> ${text}</div>`;
+            box.scrollTop = box.scrollHeight;
+
+            await fetch('/api/reply', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ pass: pass, user_id: currentUserId, message: text })
+            });
+            
+            // Refresh chat to show saved msg
+            let res = await fetch(`/api/history/${currentUserId}?pass=${pass}`);
+            let data = await res.json();
+            renderChat(data.history);
+        }
+
+        function closeModal() { document.getElementById('chatModal').style.display = 'none'; }
+        
+        loadStats();
+        setInterval(loadStats, 5000); // Auto refresh list
     </script>
 </body>
 </html>
