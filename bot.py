@@ -5,7 +5,7 @@ import datetime
 import asyncio
 import threading
 import sys
-from flask import Flask
+from flask import Flask, render_template, jsonify, request # Added for Admin Panel
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
@@ -18,14 +18,56 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==============================================================================
-# 1. LOGGING & SERVER
+# 1. LOGGING & WEB SERVER (ADMIN PANEL ADDED)
 # ==============================================================================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123") # Render me 'ADMIN_PASS' set karlena
+
 @app.route('/')
-def health_check(): return "Riya is Online 🟢", 200
+def health_check(): 
+    return "Riya Bot is Online 🟢 <br> Go to /admin?pass=YOUR_PASSWORD to view stats.", 200
+
+@app.route('/admin')
+def admin_page():
+    # URL me password check karega: website.com/admin?pass=123
+    if request.args.get('pass') != ADMIN_PASS:
+        return "<h1>❌ ACCESS DENIED</h1>"
+    return render_template('admin.html')
+
+@app.route('/api/stats')
+def api_stats():
+    # JSON Data for Dashboard
+    if request.args.get('pass') != ADMIN_PASS:
+        return jsonify({"error": "Unauthorized"})
+    
+    try:
+        total = users_col.count_documents({})
+        angry = users_col.count_documents({"mood": "angry"})
+        yesterday = datetime.datetime.now() - datetime.timedelta(hours=24)
+        active = users_col.count_documents({"last_active": {"$gt": yesterday}})
+        
+        # Fetch last 10 chats
+        recent = list(users_col.find().sort("last_active", -1).limit(10))
+        chat_list = []
+        for u in recent:
+            history = u.get("history", [])
+            u_msg = history[-2]['content'][:20] + "..." if len(history) >= 2 else "No Text"
+            b_msg = history[-1]['content'][:20] + "..." if len(history) >= 1 else "..."
+            
+            chat_list.append({
+                "name": u.get("first_name", "User"),
+                "user_msg": u_msg,
+                "bot_msg": b_msg,
+                "mood": u.get("mood", "happy"),
+                "time": u.get("last_active", datetime.datetime.now()).strftime("%H:%M")
+            })
+            
+        return jsonify({"total": total, "active": active, "angry": angry, "chats": chat_list})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -44,7 +86,7 @@ try:
     CHANNEL_ID = os.getenv("CHANNEL_ID") 
     CHANNEL_URL = os.getenv("CHANNEL_URL")
     MONGO_URI = os.getenv("MONGO_URI")
-    ADMIN_ID = os.getenv("ADMIN_ID") # Apna Telegram ID yahan daalna Render me
+    ADMIN_ID = os.getenv("ADMIN_ID")
     GROQ_KEYS = [k.strip() for k in os.getenv("GROQ_KEYS", "").split(",") if k.strip()]
 except Exception as e:
     logger.error(f"Config Error: {e}")
@@ -140,28 +182,16 @@ async def check_membership(user_id, bot):
     except: return False
     return False
 
-# --- ADMIN STATS COMMAND (/stats) ---
+# --- TELEGRAM ADMIN STATS ---
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    # Sirf Admin ko dikhega
-    if user_id != str(os.environ.get("ADMIN_ID", "")):
-        return
+    if user_id != str(os.environ.get("ADMIN_ID", "")): return
 
     try:
-        total_users = users_col.count_documents({})
-        # Last 5 active conversations fetch karna
-        recent_chats = list(users_col.find().sort("last_active", -1).limit(5))
-        
-        msg = f"📊 **BOT STATISTICS**\n\n👥 Total Lovers: {total_users}\n\n🕵️ **Recent Chats:**\n"
-        
-        for u in recent_chats:
-            last_msg = u.get("history", [])[-1] if u.get("history") else "No Chat"
-            user_txt = last_msg['content'] if isinstance(last_msg, dict) else "N/A"
-            msg += f"👤 {u.get('first_name', 'User')}: {user_txt[:20]}...\n"
-            
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+        total = users_col.count_documents({})
+        msg = f"📊 **Stats:**\nTotal Users: {total}\nCheck Web Panel for more."
+        await update.message.reply_text(msg)
+    except: pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -176,7 +206,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
     except: pass
 
-    # Check Membership on Start
     if not await check_membership(user.id, context.bot):
         keyboard = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
         await update.message.reply_text(f"Hii {user.first_name}!\nPehle channel join karo baby 👇", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -197,8 +226,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
     
-    # 🛑 STRICT JOIN CHECK (Har message pe check karega)
-    # Agar user ne join karke leave kar diya, to ye pakad lega
+    # STRICT GATEKEEPER
     if not await check_membership(user.id, context.bot):
         keyboard = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
         await update.message.reply_text("Tumne Channel leave kyu kiya? 🥺\nBaat karni hai to wapas join karo 👇", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -237,7 +265,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=1.0,
-            max_tokens=60 # Super short replies enforced
+            max_tokens=60
         )
         reply = completion.choices[0].message.content
         final_reply = intercept_safety_filter(reply)
@@ -290,9 +318,8 @@ if __name__ == '__main__':
     
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(t_req).post_init(post_init).build()
 
-    # Handlers
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('stats', admin_stats)) # New Admin Command
+    application.add_handler(CommandHandler('stats', admin_stats))
     application.add_handler(CallbackQueryHandler(verify_callback))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
