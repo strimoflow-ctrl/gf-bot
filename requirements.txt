@@ -7,3 +7,4 @@ nest_asyncio
 certifi
 flask
 gunicorn
+requests  <-- YE LINE ADD KAR DO
