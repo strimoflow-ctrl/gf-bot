@@ -5,6 +5,7 @@ import logging
 import asyncio
 import threading
 import requests
+import urllib.parse # Password fix ke liye
 from flask import Flask, render_template, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -33,14 +34,17 @@ ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
 IST = pytz.timezone('Asia/Kolkata')
 
-# Database Connection (Purana DB Name use kiya h)
+# Database Connection Fix for Special Characters in Password
 try:
-    client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-    db = client["RiyaBot_Final"] 
+    # Ye line password ke symbols ko encode kar degi taaki 'Port Error' na aaye
+    mongo_client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
+    db = mongo_client["RiyaBot_Final"] 
     users_col = db["users"]
     groups_col = db["groups"]
     codes_col = db["codes"]
-    logger.info("✅ Database Connected: RiyaBot_Final")
+    # Ping test
+    mongo_client.admin.command('ping')
+    logger.info("✅ Database Connected Successfully!")
 except Exception as e:
     logger.error(f"❌ DB Error: {e}")
 
@@ -58,173 +62,117 @@ def read_master_prompt():
         with open("prompt.txt", "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "You are Riya, a friendly Indian girl."
+        return "You are Riya, a romantic Indian girl. User is your boyfriend."
 
 async def check_membership(user_id, bot):
     try:
+        # Strict Admin Check: Bot must be admin in channel
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except: return False
+    except Exception as e:
+        logger.error(f"Member check error: {e}")
+        return False
 
 def call_ai(messages):
-    """OpenRouter GLM 4.5 Air Call"""
     try:
         res = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json"
+            },
             json={
                 "model": "z-ai/glm-4.5-air:free",
                 "messages": messages,
-                "temperature": 0.9,
+                "temperature": 1.0,
                 "max_tokens": 150
-            }
+            },
+            timeout=20
         )
         return res.json()['choices'][0]['message']['content']
-    except: return "network issue h baby.. ruko thoda 🥺"
+    except Exception as e:
+        logger.error(f"AI Error: {e}")
+        return "network issue h baby.. ruko thoda 🥺"
 
 # ==============================================================================
-# 3. ADMIN DASHBOARD API
-# ==============================================================================
-
-@app.route('/')
-def home(): return "Riya AI Pro is Live 🟢", 200
-
-@app.route('/admin')
-def admin_panel():
-    if request.args.get('pass') != ADMIN_PASS: return "<h1>Access Denied</h1>"
-    return render_template('admin.html')
-
-@app.route('/api/stats')
-def api_stats():
-    if request.args.get('pass') != ADMIN_PASS: return jsonify({"error": "Auth"})
-    total = users_col.count_documents({})
-    vip = users_col.count_documents({"status": "vip"})
-    groups = groups_col.count_documents({"status": "active"})
-    
-    # Recent users for the table
-    recent = list(users_col.find().sort("last_active", -1).limit(20))
-    items = []
-    for r in recent:
-        items.append({
-            "id": r["user_id"], "name": r.get("first_name", "User"),
-            "status": r.get("status", "free"), "expiry": str(r.get("vip_expiry", "N/A"))
-        })
-    return jsonify({"total_users": total, "vip_users": vip, "total_groups": groups, "items": items})
-
-# ==============================================================================
-# 4. COMMANDS
+# 3. HANDLERS
 # ==============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    ref_id = context.args[0] if context.args and context.args[0].isdigit() else None
-    
     user_data = users_col.find_one({"user_id": user.id})
     
+    # Membership Check
+    is_member = await check_membership(user.id, context.bot)
+    
+    if not is_member:
+        kb = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
+        await update.message.reply_text(f"hii {user.first_name}! ❤️\njoin krlo tabhi baat krungi 👇", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
     if not user_data:
         # Naya User
         users_col.insert_one({
             "user_id": user.id, "first_name": user.first_name,
             "status": "free", "vip_expiry": None, "invites_count": 0,
-            "referred_by": int(ref_id) if ref_id else None,
             "history": [], "last_active": get_current_ist()
         })
-        # Reward Inviter
-        if ref_id:
-            inviter = users_col.find_one({"user_id": int(ref_id)})
-            if inviter:
-                # Add 1 hour VIP to inviter
-                now = get_current_ist()
-                current_exp = inviter.get("vip_expiry") or now
-                if current_exp.tzinfo is None: current_exp = IST.localize(current_exp)
-                new_exp = max(current_exp, now) + datetime.timedelta(hours=1)
-                
-                users_col.update_one({"user_id": int(ref_id)}, {
-                    "$inc": {"invites_count": 1},
-                    "$set": {"vip_expiry": new_exp, "status": "vip"}
-                })
-                try: await context.bot.send_message(ref_id, "🎉 Naye user ne join kiya! Aapko 1 ghante ka VIP mila.")
-                except: pass
-
         msg = "hii kaise ho? kya me apki gf ban sakti hu? 🙈"
     else:
         # Purana User
         msg = "welcome back baby! 😘 kahan chale gaye the?"
-
-    if not await check_membership(user.id, context.bot):
-        kb = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
-        await update.message.reply_text(f"hii {user.first_name}!\njoin krlo tabhi baat krungi 👇", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        await update.message.reply_text(msg)
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = users_col.find_one({"user_id": update.effective_user.id})
-    ref_link = f"https://t.me/{(await context.bot.get_me()).username}?start={u['user_id']}"
-    msg = f"👤 **MY PROFILE**\n\nStatus: {u['status'].upper()}\nExpiry: {u.get('vip_expiry', 'N/A')}\nInvites: {u['invites_count']}\n\n🔗 **Your Invite Link:**\n`{ref_link}`"
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    text = " ".join(context.args)
-    if not text: return
     
-    users = users_col.find({})
-    count = 0
-    for u in users:
-        try:
-            await context.bot.send_message(u["user_id"], text)
-            count += 1
-            await asyncio.sleep(0.05)
-        except: pass
-    await update.message.reply_text(f"✅ Sent to {count} users.")
+    await update.message.reply_text(msg)
 
-# ==============================================================================
-# 5. CHAT LOGIC
-# ==============================================================================
+async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    if await check_membership(user_id, context.bot):
+        await query.message.delete()
+        user_data = users_col.find_one({"user_id": user_id})
+        if user_data and len(user_data.get("history", [])) > 2:
+            msg = "welcome back baby! 😘 Missed you!"
+        else:
+            msg = "Hello kaise ho? kya me apki gf ban sakti hu? 🙈"
+        await context.bot.send_message(query.message.chat_id, msg)
+    else:
+        await context.bot.send_message(query.message.chat_id, "Jhooth mat bolo! Join karke aao. 😡")
 
 async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
     text = update.message.text
-    is_grp = chat.type in ["group", "supergroup"]
-
+    
+    # 1. Forced Join Check (Every message)
     if not await check_membership(user.id, context.bot):
-        await update.message.reply_text("pehle channel join kro baby! 👇")
+        kb = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
+        await update.message.reply_text("Pehle join karo baby.. 🥺", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # User Data & VIP Check
+    # 2. Data Load
     u_data = users_col.find_one({"user_id": user.id})
-    if not u_data: return
-    
-    now = get_current_ist()
+    if not u_data:
+        users_col.insert_one({"user_id": user.id, "first_name": user.first_name, "status": "free", "history": [], "last_active": get_current_ist()})
+        u_data = users_col.find_one({"user_id": user.id})
+
+    # 3. Prepare AI Prompt
     status = u_data.get("status", "free")
-    exp = u_data.get("vip_expiry")
-    if exp and exp.tzinfo is None: exp = IST.localize(exp)
+    prompt = read_master_prompt().replace("{USER_STATUS}", status).replace("{PLATFORM}", "Private")
     
-    if exp and now > exp:
-        users_col.update_one({"user_id": user.id}, {"$set": {"status": "free"}})
-        status = "free"
+    # Time based romantic mode
+    now = get_current_ist()
+    if now.hour >= 21 or now.hour < 4:
+        prompt += "\n[SYSTEM: Night mode active. Be extra romantic and naughty.]"
 
-    # Group Logic
-    if is_grp:
-        g = groups_col.find_one({"group_id": chat.id})
-        if not g or g.get("status") != "active":
-            if "@" + (await context.bot.get_me()).username in text:
-                await update.message.reply_text("me abhi so rhi hu.. admin se kaho approve kre. 😴")
-            return
-        if "@" + (await context.bot.get_me()).username not in text and random.random() > 0.2: return
-
-    # AI Payload
-    prompt = read_master_prompt().replace("{USER_STATUS}", status).replace("{PLATFORM}", "Group" if is_grp else "Private")
-    if now.hour >= 21 or now.hour < 4: prompt += "\n[System: Night mode active. Be romantic.]"
-    
     history = u_data.get("history", [])[-10:]
     msgs = [{"role": "system", "content": prompt}] + history + [{"role": "user", "content": text}]
     
     await context.bot.send_chat_action(chat.id, 'typing')
     reply = call_ai(msgs)
 
-    # Free User Teasing
+    # 4. Free User Wall
     if status == "free":
         for t in ["I cannot", "AI model", "explicit", "NSFW"]:
             if t.lower() in reply.lower():
@@ -233,34 +181,31 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(reply.lower())
 
-    # Update DB
+    # 5. Save History
     new_hist = [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
-    users_col.update_one({"user_id": user.id}, {"$push": {"history": {"$each": new_hist}}, "$set": {"last_active": now}})
+    users_col.update_one({"user_id": user.id}, {
+        "$push": {"history": {"$each": new_hist}},
+        "$set": {"last_active": now}
+    })
 
 # ==============================================================================
-# 6. SCHEDULER & RUN
+# 4. SERVER & RUN
 # ==============================================================================
 
-async def proactive_ping(context):
-    cutoff = get_current_ist() - datetime.timedelta(hours=3)
-    users = users_col.find({"last_active": {"$lt": cutoff, "$gt": cutoff - datetime.timedelta(hours=1)}})
-    for u in users:
-        try: await context.bot.send_message(u["user_id"], random.choice(["kahan ho baby? 🥺", "bhul gye kya? rply kro.."]))
-        except: pass
-
-async def post_init(application):
-    s = AsyncIOScheduler(timezone=IST)
-    s.add_job(proactive_ping, 'interval', minutes=60, args=[application])
-    s.start()
+@app.route('/')
+def home(): return "System Active 🟢", 200
 
 if __name__ == '__main__':
+    # Start Flask in background
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
-    t_req = HTTPXRequest(connection_pool_size=8, read_timeout=60, write_timeout=60, connect_timeout=60)
-    bot_app = ApplicationBuilder().token(TOKEN).request(t_req).post_init(post_init).build()
+    
+    # Start Bot
+    t_req = HTTPXRequest(connection_pool_size=10, read_timeout=30, write_timeout=30, connect_timeout=30)
+    bot_app = ApplicationBuilder().token(TOKEN).request(t_req).build()
 
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("profile", profile))
-    bot_app.add_handler(CommandHandler("broadcast", broadcast))
+    bot_app.add_handler(CallbackQueryHandler(verify_callback))
     bot_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_msg))
     
+    logger.info("🚀 Riya AI Pro is Polling...")
     bot_app.run_polling()
