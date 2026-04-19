@@ -1,10 +1,9 @@
-python-telegram-bot>=21.9
-groq
+python-telegram-bot
 pymongo
-apscheduler
-python-dotenv
-nest_asyncio
-certifi
-flask
-gunicorn
 requests
+certifi
+apscheduler
+pytz
+flask
+python-dotenv
+gunicorn
