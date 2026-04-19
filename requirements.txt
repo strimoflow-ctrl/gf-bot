@@ -1,5 +1,6 @@
 python-telegram-bot
 pymongo
+httpx
 requests
 certifi
 apscheduler
