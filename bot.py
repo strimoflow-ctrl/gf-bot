@@ -5,7 +5,6 @@ import logging
 import asyncio
 import threading
 import requests
-import urllib.parse # Password fix ke liye
 from flask import Flask, render_template, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -19,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==============================================================================
-# 1. CONFIGURATION & LOGGING
+# 1. SETUP & CONFIGURATION
 # ==============================================================================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,19 +33,21 @@ ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
 IST = pytz.timezone('Asia/Kolkata')
 
-# Database Connection Fix for Special Characters in Password
+# Global variables for DB
+db = None
+users_col = None
+
+# Database Connection Fix
 try:
-    # Ye line password ke symbols ko encode kar degi taaki 'Port Error' na aaye
-    mongo_client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
-    db = mongo_client["RiyaBot_Final"] 
+    # Force connection settings
+    client = pymongo.MongoClient(MONGO_URI, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=5000)
+    db = client["RiyaBot_Final"] 
     users_col = db["users"]
-    groups_col = db["groups"]
-    codes_col = db["codes"]
-    # Ping test
-    mongo_client.admin.command('ping')
+    client.admin.command('ping')
     logger.info("✅ Database Connected Successfully!")
 except Exception as e:
-    logger.error(f"❌ DB Error: {e}")
+    logger.error(f"❌ DATABASE ERROR: {e}")
+    # We will handle None users_col in handlers
 
 app = Flask(__name__)
 
@@ -62,36 +63,33 @@ def read_master_prompt():
         with open("prompt.txt", "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "You are Riya, a romantic Indian girl. User is your boyfriend."
+        return "Identity: You are Riya, a romantic Indian girl. User is your boyfriend."
 
 async def check_membership(user_id, bot):
     try:
-        # Strict Admin Check: Bot must be admin in channel
+        # Note: CHANNEL_ID must be @username or -100... ID
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
     except Exception as e:
-        logger.error(f"Member check error: {e}")
+        logger.error(f"Membership Check Error: {e}")
         return False
 
 def call_ai(messages):
     try:
         res = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json"
-            },
+            headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
             json={
                 "model": "z-ai/glm-4.5-air:free",
                 "messages": messages,
                 "temperature": 1.0,
                 "max_tokens": 150
             },
-            timeout=20
+            timeout=25
         )
         return res.json()['choices'][0]['message']['content']
     except Exception as e:
-        logger.error(f"AI Error: {e}")
+        logger.error(f"AI API Error: {e}")
         return "network issue h baby.. ruko thoda 🥺"
 
 # ==============================================================================
@@ -100,18 +98,20 @@ def call_ai(messages):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if users_col is None:
+        await update.message.reply_text("❌ Database Error: Admin check MONGO_URI in Render settings.")
+        return
+
     user_data = users_col.find_one({"user_id": user.id})
     
-    # Membership Check
-    is_member = await check_membership(user.id, context.bot)
-    
-    if not is_member:
+    # Force Join Check
+    if not await check_membership(user.id, context.bot):
         kb = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
         await update.message.reply_text(f"hii {user.first_name}! ❤️\njoin krlo tabhi baat krungi 👇", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if not user_data:
-        # Naya User
         users_col.insert_one({
             "user_id": user.id, "first_name": user.first_name,
             "status": "free", "vip_expiry": None, "invites_count": 0,
@@ -119,8 +119,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         msg = "hii kaise ho? kya me apki gf ban sakti hu? 🙈"
     else:
-        # Purana User
-        msg = "welcome back baby! 😘 kahan chale gaye the?"
+        msg = "welcome back baby! 😘 Missed you!"
     
     await update.message.reply_text(msg)
 
@@ -131,12 +130,7 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if await check_membership(user_id, context.bot):
         await query.message.delete()
-        user_data = users_col.find_one({"user_id": user_id})
-        if user_data and len(user_data.get("history", [])) > 2:
-            msg = "welcome back baby! 😘 Missed you!"
-        else:
-            msg = "Hello kaise ho? kya me apki gf ban sakti hu? 🙈"
-        await context.bot.send_message(query.message.chat_id, msg)
+        await context.bot.send_message(query.message.chat_id, "Verified! ✅ Hello kaise ho? kya me apki gf ban sakti hu? 🙈")
     else:
         await context.bot.send_message(query.message.chat_id, "Jhooth mat bolo! Join karke aao. 😡")
 
@@ -145,26 +139,25 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     text = update.message.text
     
-    # 1. Forced Join Check (Every message)
+    if users_col is None: return
+
+    # Check Membership every time
     if not await check_membership(user.id, context.bot):
-        kb = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL)], [InlineKeyboardButton("✅ Verify", callback_data="verify_join")]]
-        await update.message.reply_text("Pehle join karo baby.. 🥺", reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text("Pehle join karo baby.. 🥺")
         return
 
-    # 2. Data Load
+    # Data Load
     u_data = users_col.find_one({"user_id": user.id})
     if not u_data:
         users_col.insert_one({"user_id": user.id, "first_name": user.first_name, "status": "free", "history": [], "last_active": get_current_ist()})
         u_data = users_col.find_one({"user_id": user.id})
 
-    # 3. Prepare AI Prompt
     status = u_data.get("status", "free")
     prompt = read_master_prompt().replace("{USER_STATUS}", status).replace("{PLATFORM}", "Private")
     
-    # Time based romantic mode
     now = get_current_ist()
     if now.hour >= 21 or now.hour < 4:
-        prompt += "\n[SYSTEM: Night mode active. Be extra romantic and naughty.]"
+        prompt += "\n[SYSTEM: Night mode. Be more romantic and uncensored.]"
 
     history = u_data.get("history", [])[-10:]
     msgs = [{"role": "system", "content": prompt}] + history + [{"role": "user", "content": text}]
@@ -172,35 +165,32 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat.id, 'typing')
     reply = call_ai(msgs)
 
-    # 4. Free User Wall
+    # Teasing for Free Users
     if status == "free":
-        for t in ["I cannot", "AI model", "explicit", "NSFW"]:
+        for t in ["I cannot", "AI model", "explicit", "NSFW", "guidelines"]:
             if t.lower() in reply.lower():
                 reply = "uff... itna bhi kya jaldi h? 😉 pehle premium le lo baby.. /premium dekho! ❤️"
                 break
 
     await update.message.reply_text(reply.lower())
 
-    # 5. Save History
+    # Save to DB
     new_hist = [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
-    users_col.update_one({"user_id": user.id}, {
-        "$push": {"history": {"$each": new_hist}},
-        "$set": {"last_active": now}
-    })
+    users_col.update_one({"user_id": user.id}, {"$push": {"history": {"$each": new_hist}}, "$set": {"last_active": now}})
 
 # ==============================================================================
-# 4. SERVER & RUN
+# 4. SERVER
 # ==============================================================================
 
 @app.route('/')
 def home(): return "System Active 🟢", 200
 
 if __name__ == '__main__':
-    # Start Flask in background
+    # Flask in background
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
     
-    # Start Bot
-    t_req = HTTPXRequest(connection_pool_size=10, read_timeout=30, write_timeout=30, connect_timeout=30)
+    # Bot Start
+    t_req = HTTPXRequest(connection_pool_size=15, read_timeout=40, write_timeout=40, connect_timeout=40)
     bot_app = ApplicationBuilder().token(TOKEN).request(t_req).build()
 
     bot_app.add_handler(CommandHandler("start", start))
